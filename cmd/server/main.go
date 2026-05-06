@@ -1,0 +1,121 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/arleyar/market-price-pipeline/internal/binance"
+	"github.com/arleyar/market-price-pipeline/internal/config"
+	httpapi "github.com/arleyar/market-price-pipeline/internal/http"
+	"github.com/arleyar/market-price-pipeline/internal/kafka"
+	"github.com/arleyar/market-price-pipeline/internal/pipeline"
+	"github.com/arleyar/market-price-pipeline/internal/storage"
+)
+
+func main() {
+	cfg, err := config.Load()
+	if err != nil {
+		slog.Error("config load failed", "err", err)
+		os.Exit(1)
+	}
+
+	log := newLogger(cfg.LogLevel)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	pg, err := storage.NewPostgres(ctx, cfg.PostgresDSN)
+	if err != nil {
+		log.Error("postgres init failed", "err", err)
+		os.Exit(1)
+	}
+	defer pg.Close()
+
+	rd := storage.NewRedis(cfg.RedisAddr, cfg.LatestTTL)
+	defer rd.Close()
+	if err := rd.Ping(ctx); err != nil {
+		log.Warn("redis ping at startup failed", "err", err)
+	}
+
+	kp := kafka.NewProducer(cfg.KafkaBrokers, cfg.KafkaTopic)
+	defer kp.Close()
+	if err := kp.Ping(ctx); err != nil {
+		log.Warn("kafka ping at startup failed", "err", err)
+	}
+
+	pipe := pipeline.New(pg, rd, kp, log)
+
+	router := httpapi.NewRouter(httpapi.Deps{
+		DB:      pg,
+		History: pg,
+		Cache:   rd,
+		DBPing:  pg,
+		RDPing:  rd,
+		KFPing:  kp,
+		Log:     log,
+	})
+
+	srv := &http.Server{
+		Addr:              cfg.HTTPAddr,
+		Handler:           router,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	var wg sync.WaitGroup
+
+	// HTTP server
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		log.Info("http server listening", "addr", cfg.HTTPAddr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("http server failed", "err", err)
+			stop()
+		}
+	}()
+
+	// Binance WS loop
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		stream := binance.NewStream(cfg.BinanceWSURL, cfg.Symbols, log)
+		err := stream.Run(ctx, pipe.HandleTick)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			log.Error("binance stream stopped", "err", err)
+		}
+	}()
+
+	<-ctx.Done()
+	log.Info("shutdown initiated")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Error("http shutdown error", "err", err)
+	}
+
+	wg.Wait()
+	log.Info("shutdown complete")
+}
+
+func newLogger(level string) *slog.Logger {
+	var lvl slog.Level
+	switch level {
+	case "debug":
+		lvl = slog.LevelDebug
+	case "warn":
+		lvl = slog.LevelWarn
+	case "error":
+		lvl = slog.LevelError
+	default:
+		lvl = slog.LevelInfo
+	}
+	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
+}
