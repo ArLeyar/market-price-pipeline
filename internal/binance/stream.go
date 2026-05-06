@@ -35,15 +35,20 @@ func NewStream(url string, symbols []string, log *slog.Logger) *Stream {
 }
 
 // Run blocks until ctx is cancelled. On disconnect it reconnects with
-// exponential backoff (1s..30s, with jitter).
+// exponential backoff (1s..30s, with jitter). Backoff resets to 1s once a
+// session receives at least one message — without that, transient flaps
+// would permanently pin reconnect delay at maxBackoff.
 func (s *Stream) Run(ctx context.Context, handle TickHandler) error {
-	backoff := time.Second
-	const maxBackoff = 30 * time.Second
+	const (
+		initialBackoff = time.Second
+		maxBackoff     = 30 * time.Second
+	)
+	backoff := initialBackoff
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		err := s.runOnce(ctx, handle)
+		err := s.runOnce(ctx, handle, func() { backoff = initialBackoff })
 		if err == nil || errors.Is(err, context.Canceled) {
 			return err
 		}
@@ -64,7 +69,7 @@ func (s *Stream) Run(ctx context.Context, handle TickHandler) error {
 	}
 }
 
-func (s *Stream) runOnce(ctx context.Context, handle TickHandler) error {
+func (s *Stream) runOnce(ctx context.Context, handle TickHandler, onConnected func()) error {
 	streamURL, err := buildStreamURL(s.url, s.symbols)
 	if err != nil {
 		return fmt.Errorf("build url: %w", err)
@@ -82,6 +87,7 @@ func (s *Stream) runOnce(ctx context.Context, handle TickHandler) error {
 
 	conn.SetReadLimit(1 << 20) // 1MiB
 
+	firstMessage := true
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -92,15 +98,28 @@ func (s *Stream) runOnce(ctx context.Context, handle TickHandler) error {
 		if err != nil {
 			return fmt.Errorf("read: %w", err)
 		}
+		if firstMessage {
+			firstMessage = false
+			if onConnected != nil {
+				onConnected()
+			}
+		}
 		price, err := ParseBookTickerEnvelope(raw)
 		if err != nil {
-			s.log.Warn("parse ws message failed", "err", err, "raw", string(raw))
+			s.log.Warn("parse ws message failed", "err", err, "raw", truncate(raw, 256))
 			continue
 		}
 		if err := handle(ctx, price); err != nil {
 			s.log.Error("handle tick failed", "err", err, "symbol", price.Symbol)
 		}
 	}
+}
+
+func truncate(b []byte, max int) string {
+	if len(b) <= max {
+		return string(b)
+	}
+	return string(b[:max]) + "...[truncated]"
 }
 
 // buildStreamURL constructs the combined-stream URL for given symbols.

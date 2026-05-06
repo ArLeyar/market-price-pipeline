@@ -52,20 +52,15 @@ func main() {
 
 	pipe := pipeline.New(pg, rd, kp, log)
 
-	router := httpapi.NewRouter(httpapi.Deps{
-		DB:      pg,
-		History: pg,
-		Cache:   rd,
-		DBPing:  pg,
-		RDPing:  rd,
-		KFPing:  kp,
-		Log:     log,
-	})
+	router := httpapi.NewRouter(pg, rd, kp, log)
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           router,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	var wg sync.WaitGroup
@@ -101,8 +96,19 @@ func main() {
 		log.Error("http shutdown error", "err", err)
 	}
 
-	wg.Wait()
-	log.Info("shutdown complete")
+	// Bound wg.Wait so a stuck WS read can't outlive the SIGTERM grace period
+	// and force the orchestrator to SIGKILL us.
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		log.Info("shutdown complete")
+	case <-time.After(15 * time.Second):
+		log.Warn("shutdown timeout, forcing exit")
+	}
 }
 
 func newLogger(level string) *slog.Logger {

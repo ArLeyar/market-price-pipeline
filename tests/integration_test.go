@@ -86,15 +86,7 @@ func TestEndToEnd(t *testing.T) {
 
 	pipe := pipeline.New(pg, rd, kp, log)
 
-	router := httpapi.NewRouter(httpapi.Deps{
-		DB:      pg,
-		History: pg,
-		Cache:   rd,
-		DBPing:  pg,
-		RDPing:  rd,
-		KFPing:  kp,
-		Log:     log,
-	})
+	router := httpapi.NewRouter(pg, rd, kp, log)
 	srv := httptest.NewServer(router)
 	t.Cleanup(srv.Close)
 

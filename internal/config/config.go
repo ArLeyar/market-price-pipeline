@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"strings"
 	"time"
 
@@ -24,8 +25,31 @@ func Load() (*Config, error) {
 	if err := envconfig.Process("", &c); err != nil {
 		return nil, err
 	}
-	for i, s := range c.Symbols {
-		c.Symbols[i] = strings.ToUpper(strings.TrimSpace(s))
+
+	c.Symbols = cleanList(c.Symbols, strings.ToUpper)
+	if len(c.Symbols) == 0 {
+		return nil, errors.New("SYMBOLS must contain at least one non-empty value")
 	}
+
+	c.KafkaBrokers = cleanList(c.KafkaBrokers, nil)
+	if len(c.KafkaBrokers) == 0 {
+		return nil, errors.New("KAFKA_BROKERS must contain at least one non-empty value")
+	}
+
 	return &c, nil
+}
+
+func cleanList(in []string, transform func(string) string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		if transform != nil {
+			s = transform(s)
+		}
+		out = append(out, s)
+	}
+	return out
 }
