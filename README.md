@@ -133,21 +133,101 @@ prices(id BIGSERIAL PK, exchange, symbol, ts, price NUMERIC(38,18))
 ```
 PK on `id` (not `(exchange, symbol, ts)`) because ticks can share a timestamp and a composite PK on `ts` would reject duplicates as errors. `/latest` and `/history` use stable tie-break ordering `(ts, id)`.
 
-## What I'd add for production
+## Architecture decisions (locked in)
 
-- **TimescaleDB:** swap to `timescale/timescaledb:pg16` image, `create_hypertable('prices', 'ts')`, continuous aggregates `prices_1m` / `prices_5m` / `prices_10m`, 2-year retention policy, columnar compression on old chunks. Image is wire-compatible with the current code; the migration is a single command.
-- **Kafka consumer for durability:** today an in-flight tick is lost on a crash (no outbox). In production: outbox pattern, or move the writer behind Kafka with at-least-once semantics.
-- **Batched INSERTs:** at 10k tick/s use `COPY` or multi-row `INSERT` batches (100–500).
-- **Cursor-based pagination for `/history`:** at 100ms ticks, a day per pair is ~864k rows; need `(ts, id)` cursor.
-- **Multiple CEX:** OKX, Bybit behind a `PriceStream` interface; fan-in into one Kafka topic keyed by `{exchange}:{symbol}`.
-- **Observability:** Prometheus metrics (`price_tick_total`, `db_save_duration_seconds`, `kafka_publish_total`, `ws_reconnect_total`), tracing (OpenTelemetry), Grafana dashboard.
-- **Liveness vs readiness:** split `/health` into `/livez` (process only) and `/readyz` (dependencies).
+These are the choices made for the MVP. They are explicit so future contributors know what is *intentional* and what is up for debate.
+
+| # | Decision | Reasoning |
+|---|---|---|
+| 1 | **Single Go binary, two goroutines** (WS loop + HTTP server) | Lowest moving-parts count. Splitting into ingest / writer / api services is a deployment choice, not an architectural one — fits behind the same interface boundaries when needed. |
+| 2 | **Sequential fan-out to three sinks** in `pipeline.HandleTick` (Postgres → Redis → Kafka) | Simpler than goroutine fan-out, easy to reason about and test. Per-sink timeouts (3s / 1s / 2s) prevent a wedged dependency from blocking ingest. |
+| 3 | **Postgres is source of truth.** Redis & Kafka are best-effort | A failed cache or event still leaves data persisted. `/health` returns 503 if any dependency is down so the orchestrator can pull the instance out of rotation. |
+| 4 | **Kafka is an integration point, not an internal bus** | Service only produces; consumers (analytics, alerting) attach later. Matches the showcase contract — no in-process consumer needed. |
+| 5 | **Plain Postgres with `id BIGSERIAL` PK, not composite `(exchange, symbol, ts)`** | Ticks can share a timestamp; a composite PK would reject those as errors. Stable tie-break ordering `(ts, id)` keeps `/latest` and `/history` deterministic. |
+| 6 | **TimescaleDB image used from day 1, but plain table in MVP** | The image is wire-compatible with stock Postgres. Switching to a hypertable later is one migration (`create_hypertable`) without touching the Go code or Docker image. |
+| 7 | **Resilient WebSocket loop with backoff reset** | Exponential backoff (1s → 30s + jitter); resets to 1s after the first received message so a long session + one drop does not pin the next reconnect at maxBackoff. |
+| 8 | **`/prices/history` capped at 7-day window + 10k row limit** | Range-scan on `(symbol, ts DESC)` over an unbounded range can saturate the connection pool. Capping at the handler is one line and removes a public DoS surface. |
+| 9 | **Cache-warm on DB fallback in `/prices/latest`** | After Redis restart or TTL expiry, the next request would otherwise hit Postgres until a new tick arrives. Best-effort `SetLatest` after fallback restores the hot path immediately. |
+| 10 | **`/health` is a readiness check, not liveness** | It pings dependencies and returns 503 if any is down. Kafka ping is cached for 5s to avoid amplifying load on the broker from a public unauth endpoint. |
+
+## Roadmap
+
+### Phase 1 — MVP (done) ✓
+
+Live Binance WS → Postgres / Redis / Kafka → HTTP API. Health check, validation, integration + e2e tests, single-command compose.
+
+### Phase 2 — production hardening
+
+Targeting: zero data loss, full observability, predictable load handling.
+
+- **Outbox pattern** between Postgres and Kafka. Today an in-flight tick is lost if the process crashes after the DB write but before Kafka publish completes. Add `outbox_events` table written in the same transaction as `prices`, drained by a separate worker.
+- **Batched INSERTs.** At >10k tick/s switch to `COPY` or multi-row `INSERT` (100–500 ticks per batch); buffer in a bounded channel between WS handler and DB writer.
+- **Prometheus metrics.** `price_tick_total{exchange,symbol}`, `db_save_duration_seconds`, `kafka_publish_total{result}`, `ws_reconnect_total`, `cache_hit_ratio`. Expose `/metrics` endpoint.
+- **OpenTelemetry tracing.** Span for each WS message → DB → cache → Kafka. Useful for diagnosing per-sink timeouts.
+- **Liveness vs readiness split.** `/livez` (process only) and `/readyz` (dependencies). Avoids spurious restarts on transient Redis/Kafka blips.
+- **Structured logging hardening.** Sample WARN spam (raw frame parse failures, sink errors) at high tick rates; log every Nth occurrence with a counter.
+
+### Phase 3 — scale & retention
+
+Targeting: 100+ pairs across multiple exchanges, 2-year retention, sub-second `/history` for long ranges.
+
+- **TimescaleDB activation.** `CREATE EXTENSION timescaledb`, `create_hypertable('prices', 'ts')`, `add_compression_policy('prices', INTERVAL '7 days')`, `add_retention_policy('prices', INTERVAL '2 years')`. Drop-in; the Go code does not change.
+- **Continuous aggregates** for downsampled history: `prices_1m`, `prices_5m`, `prices_10m`, `prices_1h`. `/history` accepts `interval=raw|1m|5m|10m`; long ranges read from aggregates instead of raw ticks.
+- **Cursor pagination on `/history`.** `?cursor=<ts>_<id>&limit=1000` — `(ts, id)` is already the stable sort key.
+- **Connection pool sizing.** `MaxConns` tuned to 4 × `GOMAXPROCS`; metrics on pool saturation.
+- **Postgres partition / hypertable maintenance** alerts (compression lag, chunk count).
+
+### Phase 4 — multi-exchange ingestion
+
+Targeting: OKX, Bybit, Coinbase alongside Binance.
+
+- **`PriceStream` interface** in `internal/exchange` — `Run(ctx, symbols, handle TickHandler) error`. Per-exchange package (`internal/exchange/binance`, `internal/exchange/okx`, ...) implements it.
+- **Per-exchange goroutines** in `cmd/server/main.go`, each with its own reconnect/backoff loop. Single Kafka topic, key `{exchange}:{symbol}` for partitioning.
+- **Symbol normalization.** Each exchange has its own naming (`BTC-USDT` on OKX, `BTCUSDT` on Binance). Normalize at the edge to a canonical form before the pipeline.
+- **`/prices/latest?symbol=BTCUSDT&exchange=okx`** already supported by the schema; surface it in the API contract.
+
+### Phase 5 — beyond prices
+
+Optional extensions that fit the same pipeline shape:
+
+- **Order-book snapshots** (`@depth20@100ms` on Binance) → separate topic + table.
+- **Trades stream** (`@trade`) for volume / VWAP analytics.
+- **Derivatives** — `fstream.binance.com` for futures funding / mark price.
+- **Webhook subscriptions:** clients register a URL, we POST significant price moves (>X% / minute).
+
+## Extending the system
+
+### Adding a new exchange
+
+1. Create `internal/exchange/<name>/stream.go` implementing the same shape as `internal/binance/stream.go`: `Run(ctx, handle TickHandler) error` with reconnect/backoff/parser.
+2. Add the exchange's WS URL and symbol list to `config.Config` (e.g. `OKX_WS_URL`, `OKX_SYMBOLS`).
+3. Wire one more goroutine in `cmd/server/main.go` that calls `stream.Run` with `pipe.HandleTick`.
+4. The pipeline, schema, and API need no changes — `exchange` is already a column.
+
+### Adding a new HTTP endpoint
+
+1. Add a method to `internal/http/handlers.go`.
+2. If it needs new repository methods, extend `httpapi.Store` (one Go interface, one fake update needed in `handlers_test.go`).
+3. Register the route in `internal/http/router.go`.
+
+### Adding observability
+
+1. Add Prometheus client (`prometheus/client_golang`).
+2. Register counters / histograms in `cmd/server/main.go` and inject as fields where relevant (`pipeline.Pipeline`, `binance.Stream`, `kafka.Producer`).
+3. Mount `/metrics` on the chi router.
+
+### Switching from Redis to a different cache
+
+Implement `httpapi.Cache` and `pipeline.CacheSink`. Both are 3-method interfaces; `internal/storage/redis.go` is a reference implementation.
+
+### Switching the persistence backend
+
+Implement `httpapi.Store` and `pipeline.DBSink`. Subset interfaces are defined in the consumer packages, not in `internal/storage` — the persistence package can change shape without forcing the consumers to adapt.
 
 ## Intentionally out of scope for the MVP
 
-- TimescaleDB / hypertables / continuous aggregates
-- In-process Kafka consumer
-- Batched INSERTs (a single Postgres handles 1k tick/s comfortably)
-- Outbox / retries
-- Prometheus / Grafana
-- Splitting ingest / writer / api into separate services
+- TimescaleDB / hypertables / continuous aggregates (Phase 3)
+- In-process Kafka consumer / outbox (Phase 2)
+- Batched INSERTs (Phase 2)
+- Prometheus / Grafana (Phase 2)
+- Splitting ingest / writer / api into separate services (deployment concern, not an architectural change)
