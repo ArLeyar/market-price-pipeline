@@ -185,7 +185,10 @@ func ParseBookTickerEnvelope(raw []byte) (domain.Price, error) {
 	if bid.Sign() <= 0 || ask.Sign() <= 0 {
 		return domain.Price{}, errors.New("non-positive price")
 	}
-	mid := bid.Add(ask).Div(decimal.NewFromInt(2))
+	// DivRound with 18 fractional digits matches the NUMERIC(38,18) schema.
+	// Plain .Div() uses shopspring's default precision (16), which truncates
+	// sub-cent prices like 0.000000000000000002 to zero.
+	mid := bid.Add(ask).DivRound(decimal.NewFromInt(2), 18)
 	return domain.Price{
 		Exchange: exchangeName,
 		Symbol:   strings.ToUpper(ev.Symbol),

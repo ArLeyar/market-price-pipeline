@@ -31,7 +31,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	pg, err := storage.NewPostgres(ctx, cfg.PostgresDSN)
+	// Per-dependency startup timeouts: the parent signal ctx has no deadline,
+	// so without these a bad DNS / DSN could hang the boot indefinitely.
+	const startupTimeout = 10 * time.Second
+
+	pgCtx, pgCancel := context.WithTimeout(ctx, startupTimeout)
+	pg, err := storage.NewPostgres(pgCtx, cfg.PostgresDSN)
+	pgCancel()
 	if err != nil {
 		log.Error("postgres init failed", "err", err)
 		os.Exit(1)
@@ -40,15 +46,19 @@ func main() {
 
 	rd := storage.NewRedis(cfg.RedisAddr, cfg.LatestTTL)
 	defer func() { _ = rd.Close() }()
-	if err := rd.Ping(ctx); err != nil {
+	rdCtx, rdCancel := context.WithTimeout(ctx, startupTimeout)
+	if err := rd.Ping(rdCtx); err != nil {
 		log.Warn("redis ping at startup failed", "err", err)
 	}
+	rdCancel()
 
 	kp := kafka.NewProducer(cfg.KafkaBrokers, cfg.KafkaTopic)
 	defer func() { _ = kp.Close() }()
-	if err := kp.Ping(ctx); err != nil {
+	kpCtx, kpCancel := context.WithTimeout(ctx, startupTimeout)
+	if err := kp.Ping(kpCtx); err != nil {
 		log.Warn("kafka ping at startup failed", "err", err)
 	}
+	kpCancel()
 
 	pipe := pipeline.New(pg, rd, kp, log)
 

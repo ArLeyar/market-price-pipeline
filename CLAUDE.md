@@ -65,7 +65,7 @@ See README sections **"Architecture decisions"** and **"Extending the system"** 
 
 `.github/workflows/ci.yml` runs on every PR:
 
-- `lint` — golangci-lint v2 (`.golangci.yml`, 14 linters, including `errcheck`, `staticcheck`, `bodyclose`, `errorlint`, `sqlclosecheck`)
+- `lint` — golangci-lint v2 (`.golangci.yml`, 12 linters + 2 formatters, including `errcheck`, `staticcheck`, `bodyclose`, `errorlint`, `sqlclosecheck`)
 - `unit` — `go vet` (default + integration + e2e tags), `go build`, `go test -race -cover`
 - `integration` — `go test -tags=integration` with testcontainers
 

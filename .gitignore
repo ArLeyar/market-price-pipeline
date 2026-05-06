@@ -1,4 +1,19 @@
 bin/
 .env
 *.log
+*.out
+coverage.html
 .DS_Store
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# AI agent local state (project memory, session caches, etc.)
+.claude/
+.cursor/
+.aider*
+.codeium/
+

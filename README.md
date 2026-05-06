@@ -1,5 +1,7 @@
 # Market Price Pipeline
 
+[![CI](https://github.com/ArLeyar/market-price-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/ArLeyar/market-price-pipeline/actions/workflows/ci.yml)
+
 Production-like showcase service in Go: ingests crypto-pair prices from Binance over WebSocket, persists history to Postgres, caches the latest tick in Redis, publishes events to Kafka, and exposes an HTTP API.
 
 > The original task this project was built to satisfy is captured in [`task.md`](task.md).
@@ -17,7 +19,7 @@ Binance WS ──▶ handler─┼──▶ Redis    (latest)
 
 ## Stack
 
-- Go 1.22+
+- Go 1.25+
 - Postgres 16, Redis 7, Kafka 3.7 (KRaft)
 - `pgx/v5`, `redis/go-redis/v9`, `segmentio/kafka-go`, `coder/websocket`, `chi`, `shopspring/decimal`, `slog`
 - Tests: `testcontainers-go`
@@ -26,8 +28,10 @@ Binance WS ──▶ handler─┼──▶ Redis    (latest)
 
 ```bash
 cp .env.example .env
-docker compose -f deploy/docker-compose.yml --env-file .env up --build
+make up
 ```
+
+`make up` is shorthand for `docker compose -f deploy/docker-compose.yml --env-file .env up --build`. Run `make help` for the full list of targets.
 
 What happens:
 1. `postgres`, `redis`, `kafka` come up healthy
@@ -146,7 +150,7 @@ These are the choices made for the MVP. They are explicit so future contributors
 | 3 | **Postgres is source of truth.** Redis & Kafka are best-effort | A failed cache or event still leaves data persisted. `/health` returns 503 if any dependency is down so the orchestrator can pull the instance out of rotation. |
 | 4 | **Kafka is an integration point, not an internal bus** | Service only produces; consumers (analytics, alerting) attach later. Matches the showcase contract — no in-process consumer needed. |
 | 5 | **Plain Postgres with `id BIGSERIAL` PK, not composite `(exchange, symbol, ts)`** | Ticks can share a timestamp; a composite PK would reject those as errors. Stable tie-break ordering `(ts, id)` keeps `/latest` and `/history` deterministic. |
-| 6 | **TimescaleDB image used from day 1, but plain table in MVP** | The image is wire-compatible with stock Postgres. Switching to a hypertable later is one migration (`create_hypertable`) without touching the Go code or Docker image. |
+| 6 | **Plain Postgres in MVP, Timescale is a Phase 3 swap** | Stock `postgres:16-alpine` keeps the MVP boring. Moving to TimescaleDB later is image swap (`timescale/timescaledb:latest-pg16`) + one SQL migration (`CREATE EXTENSION timescaledb; SELECT create_hypertable(...)`) without touching the Go code. |
 | 7 | **Resilient WebSocket loop with backoff reset** | Exponential backoff (1s → 30s + jitter); resets to 1s after the first received message so a long session + one drop does not pin the next reconnect at maxBackoff. |
 | 8 | **`/prices/history` capped at 7-day window + 10k row limit** | Range-scan on `(symbol, ts DESC)` over an unbounded range can saturate the connection pool. Capping at the handler is one line and removes a public DoS surface. |
 | 9 | **Cache-warm on DB fallback in `/prices/latest`** | After Redis restart or TTL expiry, the next request would otherwise hit Postgres until a new tick arrives. Best-effort `SetLatest` after fallback restores the hot path immediately. |
@@ -220,11 +224,11 @@ Optional extensions that fit the same pipeline shape:
 
 ### Switching from Redis to a different cache
 
-Implement `httpapi.Cache` and `pipeline.CacheSink`. Both are 3-method interfaces; `internal/storage/redis.go` is a reference implementation.
+Implement `httpapi.Cache` (3 methods: `GetLatest` / `SetLatest` / `Ping`) for the API hot path and `pipeline.CacheSink` (1 method: `SetLatest`) for the ingest path. `internal/storage/redis.go` is a reference implementation that satisfies both.
 
 ### Switching the persistence backend
 
-Implement `httpapi.Store` and `pipeline.DBSink`. Subset interfaces are defined in the consumer packages, not in `internal/storage` — the persistence package can change shape without forcing the consumers to adapt.
+Implement `httpapi.Store` (3 methods: `GetLatest` / `GetHistory` / `Ping`) and `pipeline.DBSink` (1 method: `Save`). Subset interfaces are defined in the consumer packages, not in `internal/storage` — the persistence package can change shape without forcing the consumers to adapt.
 
 ## Intentionally out of scope for the MVP
 
