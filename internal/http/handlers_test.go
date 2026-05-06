@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/shopspring/decimal"
+	"github.com/stretchr/testify/require"
 
 	"github.com/arleyar/market-price-pipeline/internal/domain"
 	"github.com/arleyar/market-price-pipeline/internal/storage"
@@ -128,7 +129,10 @@ func TestLatest_CacheHit(t *testing.T) {
 	srv := newServer(store, cache, &fakeEvents{})
 	defer srv.Close()
 
-	resp, _ := http.Get(srv.URL + "/prices/latest?symbol=BTCUSDT")
+	resp, err := http.Get(srv.URL + "/prices/latest?symbol=BTCUSDT")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
@@ -148,7 +152,10 @@ func TestLatest_CacheMissFallsBackToDBAndWarmsCache(t *testing.T) {
 	srv := newServer(store, cache, &fakeEvents{})
 	defer srv.Close()
 
-	resp, _ := http.Get(srv.URL + "/prices/latest?symbol=BTCUSDT")
+	resp, err := http.Get(srv.URL + "/prices/latest?symbol=BTCUSDT")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
@@ -173,7 +180,10 @@ func TestLatest_CacheErrorFallsBackToDB(t *testing.T) {
 	srv := newServer(store, cache, &fakeEvents{})
 	defer srv.Close()
 
-	resp, _ := http.Get(srv.URL + "/prices/latest?symbol=BTCUSDT")
+	resp, err := http.Get(srv.URL + "/prices/latest?symbol=BTCUSDT")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
@@ -189,7 +199,8 @@ func TestLatest_NotFound(t *testing.T) {
 	srv := newServer(store, &fakeCache{}, &fakeEvents{})
 	defer srv.Close()
 
-	resp, _ := http.Get(srv.URL + "/prices/latest?symbol=NOPE")
+	resp, err := http.Get(srv.URL + "/prices/latest?symbol=NOPE")
+	require.NoError(t, err)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status: got %d, want 404", resp.StatusCode)
@@ -201,7 +212,10 @@ func TestLatest_DBError(t *testing.T) {
 	srv := newServer(store, &fakeCache{}, &fakeEvents{})
 	defer srv.Close()
 
-	resp, _ := http.Get(srv.URL + "/prices/latest?symbol=BTCUSDT")
+	resp, err := http.Get(srv.URL + "/prices/latest?symbol=BTCUSDT")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("status: got %d, want 500", resp.StatusCode)
@@ -211,7 +225,8 @@ func TestLatest_DBError(t *testing.T) {
 func TestLatest_MissingSymbol(t *testing.T) {
 	srv := newServer(&fakeStore{}, &fakeCache{}, &fakeEvents{})
 	defer srv.Close()
-	resp, _ := http.Get(srv.URL + "/prices/latest")
+	resp, err := http.Get(srv.URL + "/prices/latest")
+	require.NoError(t, err)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status: %d", resp.StatusCode)
@@ -244,7 +259,8 @@ func TestHistory_Validation(t *testing.T) {
 			store := &fakeStore{}
 			srv := newServer(store, &fakeCache{}, &fakeEvents{})
 			defer srv.Close()
-			resp, _ := http.Get(srv.URL + "/prices/history?" + tc.query)
+			resp, err := http.Get(srv.URL + "/prices/history?" + tc.query)
+			require.NoError(t, err)
 			defer resp.Body.Close()
 			if resp.StatusCode != tc.wantCode {
 				body, _ := io.ReadAll(resp.Body)
@@ -272,7 +288,8 @@ func TestHistory_HappyPath(t *testing.T) {
 		"from":   []string{now.Add(-10 * time.Second).Format(time.RFC3339)},
 		"to":     []string{now.Format(time.RFC3339)},
 	}
-	resp, _ := http.Get(srv.URL + "/prices/history?" + q.Encode())
+	resp, err := http.Get(srv.URL + "/prices/history?" + q.Encode())
+	require.NoError(t, err)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -300,7 +317,8 @@ func TestHistory_LimitClampedToMax(t *testing.T) {
 	// limit=99999 must be clamped to 10000 and accepted (not 400)
 	q := "symbol=BTCUSDT&from=" + url.QueryEscape(now.Add(-time.Hour).Format(time.RFC3339)) +
 		"&to=" + url.QueryEscape(now.Format(time.RFC3339)) + "&limit=99999"
-	resp, _ := http.Get(srv.URL + "/prices/history?" + q)
+	resp, err := http.Get(srv.URL + "/prices/history?" + q)
+	require.NoError(t, err)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status: %d", resp.StatusCode)

@@ -31,8 +31,10 @@ func env(key, def string) string {
 	return def
 }
 
-func apiURL() string         { return env("E2E_API_URL", "http://localhost:8080") }
-func pgDSN() string          { return env("E2E_PG_DSN", "postgres://postgres:postgres@localhost:5432/prices?sslmode=disable") }
+func apiURL() string { return env("E2E_API_URL", "http://localhost:8080") }
+func pgDSN() string {
+	return env("E2E_PG_DSN", "postgres://postgres:postgres@localhost:5432/prices?sslmode=disable")
+}
 func kafkaBrokers() []string { return strings.Split(env("E2E_KAFKA_BROKERS", "localhost:9094"), ",") }
 func kafkaTopic() string     { return env("E2E_KAFKA_TOPIC", "prices.ticks") }
 

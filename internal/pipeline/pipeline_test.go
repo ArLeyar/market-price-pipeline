@@ -63,12 +63,12 @@ func TestHandleTick(t *testing.T) {
 	eventErr := errors.New("kafka boom")
 
 	cases := []struct {
-		name              string
-		dbErr, cacheErr   error
-		eventErr          error
-		wantErr           bool
-		wantCacheCalled   bool
-		wantEventCalled   bool
+		name            string
+		dbErr, cacheErr error
+		eventErr        error
+		wantErr         bool
+		wantCacheCalled bool
+		wantEventCalled bool
 	}{
 		{name: "all sinks succeed", wantCacheCalled: true, wantEventCalled: true},
 		{name: "db failure aborts tick", dbErr: dbErr, wantErr: true},

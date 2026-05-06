@@ -83,7 +83,7 @@ func (s *Stream) runOnce(ctx context.Context, handle TickHandler, onConnected fu
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
-	defer conn.Close(websocket.StatusNormalClosure, "bye")
+	defer func() { _ = conn.Close(websocket.StatusNormalClosure, "bye") }()
 
 	conn.SetReadLimit(1 << 20) // 1MiB
 
