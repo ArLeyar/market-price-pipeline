@@ -39,13 +39,13 @@ func main() {
 	defer pg.Close()
 
 	rd := storage.NewRedis(cfg.RedisAddr, cfg.LatestTTL)
-	defer rd.Close()
+	defer func() { _ = rd.Close() }()
 	if err := rd.Ping(ctx); err != nil {
 		log.Warn("redis ping at startup failed", "err", err)
 	}
 
 	kp := kafka.NewProducer(cfg.KafkaBrokers, cfg.KafkaTopic)
-	defer kp.Close()
+	defer func() { _ = kp.Close() }()
 	if err := kp.Ping(ctx); err != nil {
 		log.Warn("kafka ping at startup failed", "err", err)
 	}

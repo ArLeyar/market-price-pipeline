@@ -92,7 +92,7 @@ func (p *Producer) dialPing(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if _, err := conn.Brokers(); err != nil {
 		return fmt.Errorf("brokers: %w", err)
 	}
