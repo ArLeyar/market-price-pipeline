@@ -44,8 +44,36 @@ jobs:
         run: go vet -tags=e2e ./tests/...
       - name: Build
         run: go build ./...
-      - name: Test
-        run: go test -race -count=1 ./internal/... ./cmd/...
+      - name: Test with coverage
+        run: |
+          go test -race -count=1 \
+            -coverprofile=coverage.out -covermode=atomic \
+            ./internal/... ./cmd/...
+
+      - name: Coverage summary
+        run: |
+          {
+            echo "## Unit test coverage"
+            echo
+            echo '```'
+            go tool cover -func=coverage.out
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+          retention-days: 14
+
+      - name: Upload coverage to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.out
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   integration:
     name: Integration tests (testcontainers)

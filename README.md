@@ -2,6 +2,8 @@
 
 Production-like showcase service in Go: ingests crypto-pair prices from Binance over WebSocket, persists history to Postgres, caches the latest tick in Redis, publishes events to Kafka, and exposes an HTTP API.
 
+> The original task this project was built to satisfy is captured in [`task.md`](task.md).
+
 ```
                        ┌──▶ Postgres (history)
 Binance WS ──▶ handler─┼──▶ Redis    (latest)
