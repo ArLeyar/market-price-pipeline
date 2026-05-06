@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -50,15 +51,37 @@ jobs:
             -coverprofile=coverage.out -covermode=atomic \
             ./internal/... ./cmd/...
 
-      - name: Coverage summary
+      - name: Build coverage summary
+        id: cov
         run: |
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ {print $3}')
           {
-            echo "## Unit test coverage"
+            echo "## Unit test coverage — ${total}"
+            echo
+            echo '<details><summary>Per-file breakdown</summary>'
             echo
             echo '```'
             go tool cover -func=coverage.out
             echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+            echo
+            echo '</details>'
+          } > /tmp/cov.md
+          {
+            echo "total=${total}"
+            {
+              echo 'body<<EOF'
+              cat /tmp/cov.md
+              echo 'EOF'
+            }
+          } >> "$GITHUB_OUTPUT"
+          cat /tmp/cov.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment coverage on PR
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: unit-coverage
+          message: ${{ steps.cov.outputs.body }}
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
@@ -66,14 +89,6 @@ jobs:
           name: coverage
           path: coverage.out
           retention-days: 14
-
-      - name: Upload coverage to Codecov
-        if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@v5
-        with:
-          files: coverage.out
-          fail_ci_if_error: false
-          token: ${{ secrets.CODECOV_TOKEN }}
 
   integration:
     name: Integration tests (testcontainers)
