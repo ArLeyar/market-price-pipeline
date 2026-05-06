@@ -56,11 +56,13 @@ func (p *Postgres) Save(ctx context.Context, price domain.Price) error {
 }
 
 func (p *Postgres) GetLatest(ctx context.Context, exchange, symbol string) (domain.Price, error) {
+	// Stable tie-break by id: with 100ms ticks the same ts can appear twice;
+	// without it Postgres may pick either row, masking the truly latest insert.
 	const q = `
 		SELECT exchange, symbol, ts, price
 		FROM prices
 		WHERE exchange = $1 AND symbol = $2
-		ORDER BY ts DESC
+		ORDER BY ts DESC, id DESC
 		LIMIT 1`
 	var out domain.Price
 	err := p.pool.QueryRow(ctx, q, exchange, symbol).Scan(&out.Exchange, &out.Symbol, &out.TS, &out.Price)
@@ -78,7 +80,7 @@ func (p *Postgres) GetHistory(ctx context.Context, exchange, symbol string, from
 		SELECT ts, price
 		FROM prices
 		WHERE exchange = $1 AND symbol = $2 AND ts >= $3 AND ts <= $4
-		ORDER BY ts ASC
+		ORDER BY ts ASC, id ASC
 		LIMIT $5`
 	rows, err := p.pool.Query(ctx, q, exchange, symbol, from, to, limit)
 	if err != nil {

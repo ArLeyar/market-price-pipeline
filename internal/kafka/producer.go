@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/segmentio/kafka-go"
@@ -11,10 +12,19 @@ import (
 	"github.com/arleyar/market-price-pipeline/internal/domain"
 )
 
+// Ping cache: opening a TCP connection per /health call is wasteful and
+// turns a public unauth endpoint into a Kafka FD-pressure amplifier.
+const pingCacheTTL = 5 * time.Second
+
 type Producer struct {
 	writer  *kafka.Writer
 	brokers []string
 	topic   string
+
+	pingMu  sync.Mutex
+	pingAt  time.Time
+	pingErr error
+	pinged  bool
 }
 
 func NewProducer(brokers []string, topic string) *Producer {
@@ -24,6 +34,7 @@ func NewProducer(brokers []string, topic string) *Producer {
 			Topic:        topic,
 			Balancer:     &kafka.Hash{},
 			BatchTimeout: 50 * time.Millisecond,
+			WriteTimeout: 5 * time.Second,
 			RequiredAcks: kafka.RequireOne,
 			Async:        false,
 		},
@@ -52,8 +63,27 @@ func (p *Producer) Publish(ctx context.Context, price domain.Price) error {
 	return nil
 }
 
-// Ping checks broker connectivity by dialing the first broker and listing topics.
+// Ping checks broker connectivity, caching the result for pingCacheTTL.
 func (p *Producer) Ping(ctx context.Context) error {
+	p.pingMu.Lock()
+	if p.pinged && time.Since(p.pingAt) < pingCacheTTL {
+		err := p.pingErr
+		p.pingMu.Unlock()
+		return err
+	}
+	p.pingMu.Unlock()
+
+	err := p.dialPing(ctx)
+
+	p.pingMu.Lock()
+	p.pinged = true
+	p.pingAt = time.Now()
+	p.pingErr = err
+	p.pingMu.Unlock()
+	return err
+}
+
+func (p *Producer) dialPing(ctx context.Context) error {
 	if len(p.brokers) == 0 {
 		return fmt.Errorf("no brokers configured")
 	}

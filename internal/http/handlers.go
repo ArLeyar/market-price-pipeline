@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -17,10 +18,21 @@ const (
 	defaultExchange = "binance"
 	defaultLimit    = 1000
 	maxLimit        = 10000
+
+	// 100ms ticks × 100 pairs × 7 days ≈ 6B rows; with limit=10k the index
+	// can still scan a huge range. Capping the window protects the pool.
+	maxHistoryWindow = 7 * 24 * time.Hour
+
+	// Best-effort cache warm after DB fallback should not extend handler latency
+	// significantly if Redis is slow.
+	cacheWarmTimeout = 500 * time.Millisecond
 )
 
 type Handlers struct {
-	deps Deps
+	store  Store
+	cache  Cache
+	events EventBus
+	log    *slog.Logger
 }
 
 type priceDTO struct {
@@ -59,15 +71,15 @@ func (h *Handlers) Health(w http.ResponseWriter, r *http.Request) {
 		"kafka": "up",
 	}
 	overallOK := true
-	if err := h.deps.DBPing.Ping(ctx); err != nil {
+	if err := h.store.Ping(ctx); err != nil {
 		checks["db"] = "down"
 		overallOK = false
 	}
-	if err := h.deps.RDPing.Ping(ctx); err != nil {
+	if err := h.cache.Ping(ctx); err != nil {
 		checks["redis"] = "down"
 		overallOK = false
 	}
-	if err := h.deps.KFPing.Ping(ctx); err != nil {
+	if err := h.events.Ping(ctx); err != nil {
 		checks["kafka"] = "down"
 		overallOK = false
 	}
@@ -96,24 +108,38 @@ func (h *Handlers) Latest(w http.ResponseWriter, r *http.Request) {
 		exchange = defaultExchange
 	}
 
-	if h.deps.Cache != nil {
-		if p, ok, err := h.deps.Cache.GetLatest(r.Context(), exchange, symbol); err == nil && ok {
+	if h.cache != nil {
+		if p, ok, err := h.cache.GetLatest(r.Context(), exchange, symbol); err == nil && ok {
 			writeJSON(w, http.StatusOK, toDTO(p))
 			return
 		}
 	}
 
-	p, err := h.deps.DB.GetLatest(r.Context(), exchange, symbol)
+	p, err := h.store.GetLatest(r.Context(), exchange, symbol)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "no prices for symbol")
 			return
 		}
-		h.deps.Log.Error("latest db failed", "err", err)
+		h.log.Error("latest db failed", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	h.warmCache(r.Context(), p)
 	writeJSON(w, http.StatusOK, toDTO(p))
+}
+
+// warmCache writes the DB-fallback result back into Redis so subsequent
+// requests skip the DB hit until the next live tick refreshes it.
+func (h *Handlers) warmCache(ctx context.Context, p domain.Price) {
+	if h.cache == nil {
+		return
+	}
+	cctx, cancel := context.WithTimeout(ctx, cacheWarmTimeout)
+	defer cancel()
+	if err := h.cache.SetLatest(cctx, p); err != nil {
+		h.log.Warn("cache warm failed", "err", err, "symbol", p.Symbol)
+	}
 }
 
 func (h *Handlers) History(w http.ResponseWriter, r *http.Request) {
@@ -142,6 +168,10 @@ func (h *Handlers) History(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "from must be < to")
 		return
 	}
+	if to.Sub(from) > maxHistoryWindow {
+		writeError(w, http.StatusBadRequest, "range exceeds maximum window of 7 days")
+		return
+	}
 	limit := defaultLimit
 	if v := q.Get("limit"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -155,9 +185,9 @@ func (h *Handlers) History(w http.ResponseWriter, r *http.Request) {
 		limit = n
 	}
 
-	rows, err := h.deps.History.GetHistory(r.Context(), exchange, symbol, from, to, limit)
+	rows, err := h.store.GetHistory(r.Context(), exchange, symbol, from, to, limit)
 	if err != nil {
-		h.deps.Log.Error("history db failed", "err", err)
+		h.log.Error("history db failed", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
