@@ -1,8 +1,9 @@
 package binance
 
 import (
-	"strings"
 	"testing"
+
+	"github.com/shopspring/decimal"
 )
 
 func TestParseBookTickerEnvelope(t *testing.T) {
@@ -11,7 +12,7 @@ func TestParseBookTickerEnvelope(t *testing.T) {
 		input     string
 		wantErr   bool
 		wantSym   string
-		wantPrice string // string repr of mid price
+		wantPrice string // exact decimal repr of mid price
 	}{
 		{
 			name:      "raw bookTicker",
@@ -24,6 +25,21 @@ func TestParseBookTickerEnvelope(t *testing.T) {
 			input:     `{"stream":"btcusdt@bookTicker","data":{"u":1,"s":"BTCUSDT","b":"100","B":"1","a":"102","A":"1"}}`,
 			wantSym:   "BTCUSDT",
 			wantPrice: "101",
+		},
+		{
+			// Exercises NUMERIC(38,18) precision: input is at the schema's
+			// fractional limit (18 digits). The parser must not truncate.
+			name:      "high-precision sub-cent",
+			input:     `{"u":1,"s":"DUSTBTC","b":"0.000000000000000001","B":"1","a":"0.000000000000000003","A":"1"}`,
+			wantSym:   "DUSTBTC",
+			wantPrice: "0.000000000000000002",
+		},
+		{
+			// Mid of bid+ask with mismatched scales must round-trip exactly.
+			name:      "mixed scales",
+			input:     `{"u":1,"s":"BTCUSDT","b":"60000.1","B":"1","a":"60000.3","A":"1"}`,
+			wantSym:   "BTCUSDT",
+			wantPrice: "60000.2",
 		},
 		{
 			name:    "empty",
@@ -50,6 +66,11 @@ func TestParseBookTickerEnvelope(t *testing.T) {
 			input:   `{"u":1,"s":"BTCUSDT","b":"-1","B":"1","a":"1","A":"1"}`,
 			wantErr: true,
 		},
+		{
+			name:    "zero price rejected (mid would be 0)",
+			input:   `{"u":1,"s":"BTCUSDT","b":"0","B":"1","a":"0","A":"1"}`,
+			wantErr: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -66,8 +87,9 @@ func TestParseBookTickerEnvelope(t *testing.T) {
 			if p.Symbol != tc.wantSym {
 				t.Errorf("symbol: got %s, want %s", p.Symbol, tc.wantSym)
 			}
-			if got := p.Price.String(); !strings.HasPrefix(got, tc.wantPrice) {
-				t.Errorf("price: got %s, want prefix %s", got, tc.wantPrice)
+			want := decimal.RequireFromString(tc.wantPrice)
+			if !p.Price.Equal(want) {
+				t.Errorf("price: got %s, want %s", p.Price.String(), want.String())
 			}
 		})
 	}

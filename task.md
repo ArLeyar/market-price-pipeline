@@ -34,7 +34,7 @@ The project was built to satisfy this assignment:
 | 2 | Persist to DB | `internal/storage/postgres.go` — `Save` per tick into `prices` table (`migrations/0001_init.up.sql`) |
 | 3 | Publish event to Kafka after persisting | `internal/pipeline/pipeline.go` — sequential write order Postgres → Redis → Kafka; Postgres is source of truth, Redis/Kafka are best-effort |
 | 4 | HTTP API | `internal/http/handlers.go` — `/health`, `/prices/latest`, `/prices/history` |
-| 5 | Single-command startup | `docker compose -f deploy/docker-compose.yml --env-file .env up --build` (postgres, redis, kafka, migrate, kafka-init, server) |
+| 5 | Single-command startup | `make up` (which expands to `docker compose -f deploy/docker-compose.yml --env-file .env up --build`). The compose file lives under `deploy/` so the repo root stays minimal. |
 | 6 | Integration tests | `tests/integration_test.go` (testcontainers, isolated) and `tests/e2e_test.go` (live compose stack + real Binance) |
 | 7 | README | `README.md` — quick start, env table, curl examples, architecture decisions, phased roadmap, extension guide |
 

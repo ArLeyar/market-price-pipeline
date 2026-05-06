@@ -73,8 +73,12 @@ func TestE2E_API_LiveData(t *testing.T) {
 		require.Less(t, time.Since(ts), freshnessWindow, "ts must be fresh, got %s (now=%s)", ts, time.Now())
 	}
 
-	// 4. /prices/history — last 30s, count>0, sorted ASC, all prices > 0
-	hist1 := getHistory(t, "BTCUSDT", 30*time.Second)
+	// 4. /prices/history — last 30s, count>0, sorted ASC, all prices > 0.
+	// Pin `from` to a fixed timestamp captured *before* the first read so the
+	// sliding-window race (ticks aging out faster than new ones arrive) cannot
+	// flip the "count grows" assertion in step 5.
+	from := time.Now().UTC().Add(-30 * time.Second)
+	hist1 := getHistoryFrom(t, "BTCUSDT", from)
 	require.NotEmpty(t, hist1.Items, "history must contain ticks")
 	require.True(t, sortedASC(hist1.Items), "history must be sorted by ts ASC")
 	for _, it := range hist1.Items {
@@ -83,9 +87,9 @@ func TestE2E_API_LiveData(t *testing.T) {
 		require.True(t, p.Sign() > 0)
 	}
 
-	// 5. live stream: count grows after sleep
+	// 5. live stream: count grows when reading the same `from` after a delay.
 	time.Sleep(3 * time.Second)
-	hist2 := getHistory(t, "BTCUSDT", 30*time.Second)
+	hist2 := getHistoryFrom(t, "BTCUSDT", from)
 	require.Greater(t, hist2.Count, hist1.Count, "history count must grow (stream is live); was %d, now %d", hist1.Count, hist2.Count)
 
 	// 6. negative cases
@@ -266,13 +270,11 @@ type historyResp struct {
 	Count int           `json:"count"`
 }
 
-func getHistory(t *testing.T, symbol string, window time.Duration) historyResp {
+func getHistoryFrom(t *testing.T, symbol string, from time.Time) historyResp {
 	t.Helper()
-	now := time.Now().UTC()
-	from := now.Add(-window).Format(time.RFC3339)
-	to := now.Format(time.RFC3339)
+	to := time.Now().UTC()
 	u := fmt.Sprintf("%s/prices/history?symbol=%s&from=%s&to=%s&limit=10000",
-		apiURL(), symbol, url.QueryEscape(from), url.QueryEscape(to))
+		apiURL(), symbol, url.QueryEscape(from.Format(time.RFC3339)), url.QueryEscape(to.Format(time.RFC3339)))
 	resp, err := http.Get(u)
 	require.NoError(t, err)
 	defer resp.Body.Close()
